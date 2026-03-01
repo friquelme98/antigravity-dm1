@@ -1,12 +1,13 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { format, subDays } from 'date-fns'
-import { Upload, Download, Wifi, AlertCircle, Info, CheckCircle } from 'lucide-react'
+import { Upload, Download, Wifi, WifiOff, AlertCircle, Info, CheckCircle, RefreshCw, LogOut } from 'lucide-react'
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
     ResponsiveContainer, ReferenceLine, ReferenceArea
 } from 'recharts'
 import { useStore } from '../store'
 import { parseLibreViewCSV, computeDailySummary, glucoseStatus, trendArrow } from '../lib/glucose'
+import { llLogin, llFetchGlucose, loadSession, clearSession, type LLURegion, type LLUSession } from '../lib/librelinkup'
 
 type Tab = 'grafico' | 'metricas' | 'importar' | 'librelinkup'
 
@@ -273,19 +274,99 @@ export default function GlucosePage() {
 
 function LibreLinkUpPanel() {
     const [accepted, setAccepted] = useState(false)
-    const [user, setUser] = useState('')
+    const [email, setEmail] = useState('')
     const [pass, setPass] = useState('')
-    const [region, setRegion] = useState('EU')
-    const { addToast } = useStore()
+    const [region, setRegion] = useState<LLURegion>('EU')
+    const [loading, setLoading] = useState(false)
+    const [session, setSession] = useState<LLUSession | null>(() => loadSession())
+    const [lastSync, setLastSync] = useState<Date | null>(null)
+    const [currentReading, setCurrentReading] = useState<{ value_mgdl: number; trend: string } | null>(null)
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const { addReadings, setDailySummaries, addToast } = useStore()
 
-    const REGIONS = [
-        { value: 'EU', label: 'Europa (EU2) — recomendado LATAM' },
-        { value: 'US', label: 'Estados Unidos (US)' },
-        { value: 'AP', label: 'Asia-Pacífico (AP)' },
-        { value: 'AUS', label: 'Australia (AUS)' },
-        { value: 'CA', label: 'Canadá (CA)' },
+    const REGIONS: { value: LLURegion; label: string }[] = [
+        { value: 'EU', label: 'Europa — recomendado LATAM' },
+        { value: 'EU2', label: 'Europa 2 (EU2)' },
+        { value: 'US', label: 'Estados Unidos' },
+        { value: 'AP', label: 'Asia-Pacífico' },
+        { value: 'AUS', label: 'Australia' },
+        { value: 'CA', label: 'Canadá' },
     ]
 
+    // Mapear lecturas del proxy al formato de la app
+    const ingestReadings = useCallback((raw: Array<{ value_mgdl: number; trend: string; timestamp: string }>) => {
+        if (!raw?.length) return
+        const mapped = raw.map((r, i) => ({
+            id: `llu-${Date.now()}-${i}`,
+            timestamp: new Date(r.timestamp),
+            value_mgdl: r.value_mgdl,
+            trend: r.trend as import('../types').GlucoseTrend,
+            source: 'librelinkup' as const,
+            isManual: false,
+        }))
+        addReadings(mapped)
+
+        // Recalcular daily summaries
+        const byDay = new Map<string, typeof mapped>()
+        mapped.forEach(r => {
+            const d = r.timestamp.toISOString().split('T')[0]
+            if (!byDay.has(d)) byDay.set(d, [])
+            byDay.get(d)!.push(r)
+        })
+        const summaries = Array.from(byDay.entries()).map(([date, rs]) => computeDailySummary(rs, date))
+        setDailySummaries(summaries)
+    }, [addReadings, setDailySummaries])
+
+    const doFetch = useCallback(async (s: LLUSession) => {
+        try {
+            const data = await llFetchGlucose(s)
+            ingestReadings(data.readings)
+            if (data.current) setCurrentReading({ value_mgdl: data.current.value_mgdl, trend: data.current.trend })
+            setLastSync(new Date())
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Error de sincronización'
+            if (msg.includes('expirado') || msg.includes('inválido')) {
+                clearSession()
+                setSession(null)
+                addToast('⚠️ Sesión expirada — vuelve a iniciar sesión', 'error')
+            }
+        }
+    }, [ingestReadings, addToast])
+
+    // Polling cada 5 minutos
+    useEffect(() => {
+        if (!session) return
+        doFetch(session)  // fetch inmediato al conectar
+        pollRef.current = setInterval(() => doFetch(session), 5 * 60 * 1000)
+        return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    }, [session, doFetch])
+
+    const handleLogin = async () => {
+        if (!email || !pass) return
+        setLoading(true)
+        try {
+            const result = await llLogin(email, pass, region)
+            setSession(result.session)
+            setPass('')  // limpiar contraseña de memoria
+            if (result.current) setCurrentReading({ value_mgdl: result.current.value_mgdl, trend: result.current.trend })
+            addToast(`✅ Conectado a LibreLinkUp · ${result.connections.length} conexión(es)`, 'success')
+        } catch (err) {
+            addToast(`❌ ${err instanceof Error ? err.message : 'Error de conexión'}`, 'error')
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    const handleDisconnect = () => {
+        if (pollRef.current) clearInterval(pollRef.current)
+        clearSession()
+        setSession(null)
+        setCurrentReading(null)
+        setLastSync(null)
+        addToast('Desconectado de LibreLinkUp', 'info')
+    }
+
+    // ── DISCLAIMER ─────────────────────────────────────────────────────────
     if (!accepted) {
         return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -298,19 +379,17 @@ function LibreLinkUpPanel() {
                         </div>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                        <p>Esta integración utiliza la <strong style={{ color: 'var(--text-primary)' }}>API no oficial de LibreLinkUp</strong>, obtenida por reverse engineering de la app móvil por la comunidad Nightscout (proyecto DRFR0ST/libre-link-unofficial-api, actualizado continuamente).</p>
-                        <p><strong style={{ color: 'var(--warning)' }}>Importante entender antes de continuar:</strong></p>
+                        <p>Esta integración utiliza la <strong style={{ color: 'var(--text-primary)' }}>API no oficial de LibreLinkUp</strong>, obtenida por reverse engineering de la comunidad Nightscout.</p>
                         <ul style={{ paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 6 }}>
                             <li>No es soportada oficialmente por Abbott</li>
-                            <li>Puede dejar de funcionar sin previo aviso si Abbott cambia su backend</li>
-                            <li>Tus credenciales de LibreLinkUp se almacenan cifradas solo en tu dispositivo y/o Firebase Secret Manager — nunca en texto plano</li>
-                            <li>La frecuencia de polling es cada 5 minutos (datos diferidos, no tiempo real del sensor)</li>
-                            <li>Al usarla, el riesgo técnico y legal es tuyo como usuario</li>
+                            <li>Puede dejar de funcionar si Abbott cambia su backend</li>
+                            <li>Tus credenciales se envían por HTTPS y <strong>no se almacenan</strong> — solo el token de sesión (expira en 1h)</li>
+                            <li>Polling cada 5 min — no es tiempo real del sensor, sino del servidor de Abbott</li>
                         </ul>
-                        <p style={{ color: 'var(--text-primary)' }}>Para uso personal de un único usuario (tú mismo), el riesgo legal es mínimo. Esta integración existe en Nightscout Pro, xDrip+ y otras plataformas de gestión de DM1.</p>
                     </div>
                 </div>
-                <button className="btn btn--warning btn--full btn--lg" onClick={() => setAccepted(true)}
+                <button className="btn btn--full btn--lg"
+                    onClick={() => setAccepted(true)}
                     style={{ background: 'var(--warning-bg)', color: 'var(--warning)', border: '1px solid rgba(255,159,10,0.4)' }}>
                     Entiendo los riesgos — Continuar
                 </button>
@@ -318,45 +397,93 @@ function LibreLinkUpPanel() {
         )
     }
 
+    // ── CONECTADO ───────────────────────────────────────────────────────────
+    if (session) {
+        const trendIcon = { Flat: '→', Rising: '↗', RisingRapidly: '↑↑', Falling: '↘', FallingRapidly: '↓↓', Unknown: '?' }
+        return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div className="card" style={{ borderColor: 'rgba(48,209,88,0.3)' }}>
+                    <div className="flex-between" style={{ marginBottom: 14 }}>
+                        <div className="flex-row gap-12">
+                            <Wifi size={20} color="var(--success)" />
+                            <div>
+                                <div style={{ fontWeight: 700 }}>LibreLinkUp conectado</div>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+                                    {lastSync ? `Última sync: ${format(lastSync, 'HH:mm:ss')}` : 'Sincronizando...'}
+                                </div>
+                            </div>
+                        </div>
+                        <span className="badge badge--success">● LIVE</span>
+                    </div>
+
+                    {currentReading && (
+                        <div style={{ textAlign: 'center', padding: '20px 0', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', marginBottom: 14 }}>
+                            <div style={{ fontSize: '3rem', fontWeight: 700, letterSpacing: '-0.04em', color: currentReading.value_mgdl < 70 ? 'var(--danger)' : currentReading.value_mgdl > 180 ? 'var(--warning)' : 'var(--success)' }}>
+                                {currentReading.value_mgdl}
+                                <span style={{ fontSize: '1.5rem', marginLeft: 8 }}>{trendIcon[currentReading.trend as keyof typeof trendIcon] ?? '?'}</span>
+                            </div>
+                            <div style={{ fontSize: '0.8125rem', color: 'var(--text-tertiary)' }}>mg/dL · LibreLinkUp</div>
+                        </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: 10 }}>
+                        <button className="btn btn--secondary" style={{ flex: 1 }} onClick={() => session && doFetch(session)}>
+                            <RefreshCw size={15} /> Sync ahora
+                        </button>
+                        <button className="btn btn--danger" onClick={handleDisconnect}>
+                            <LogOut size={15} /> Desconectar
+                        </button>
+                    </div>
+                </div>
+
+                <div className="disclaimer-banner">
+                    🔄 La sincronización automática ocurre cada 5 minutos mientras esta página esté abierta. Para sincronización en background cuando la app está cerrada, se requiere una app nativa iOS (en desarrollo).
+                </div>
+            </div>
+        )
+    }
+
+    // ── LOGIN ───────────────────────────────────────────────────────────────
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div className="card">
                 <div className="flex-row gap-12" style={{ marginBottom: 16 }}>
-                    <Wifi size={22} color="var(--info)" />
+                    <WifiOff size={22} color="var(--text-tertiary)" />
                     <div>
                         <h3>Conectar LibreLinkUp</h3>
-                        <p style={{ fontSize: '0.8125rem', marginTop: 2 }}>Los datos se sincronizarán cada 5 minutos desde los servidores de Abbott</p>
+                        <p style={{ fontSize: '0.8125rem', marginTop: 2 }}>Sincronización cada 5 min desde servidores Abbott</p>
                     </div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                     <div className="input-group">
-                        <label className="input-label">Región según tu cuenta LibreLinkUp</label>
-                        <select className="input" value={region} onChange={e => setRegion(e.target.value)}>
+                        <label className="input-label">Región de tu cuenta</label>
+                        <select className="input" value={region} onChange={e => setRegion(e.target.value as LLURegion)}>
                             {REGIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                         </select>
                     </div>
                     <div className="input-group">
                         <label className="input-label">Email de LibreLinkUp</label>
-                        <input className="input" type="email" placeholder="tu@email.com" value={user} onChange={e => setUser(e.target.value)} />
+                        <input className="input" type="email" placeholder="tu@email.com" value={email} onChange={e => setEmail(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && handleLogin()} />
                     </div>
                     <div className="input-group">
-                        <label className="input-label">Contraseña LibreLinkUp</label>
-                        <input className="input" type="password" placeholder="Contraseña" value={pass} onChange={e => setPass(e.target.value)} />
+                        <label className="input-label">Contraseña</label>
+                        <input className="input" type="password" placeholder="Contraseña de LibreLinkUp" value={pass} onChange={e => setPass(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && handleLogin()} />
                     </div>
-                    <div className="disclaimer-banner">
-                        🔒 Tus credenciales se enviarán via HTTPS a una Cloud Function segura y se almacenarán cifradas con AES-256 en Firebase Secret Manager. Nunca se guardan en Firestore ni en texto plano. Puedes revocar el acceso en cualquier momento desde Ajustes.
+                    <div className="disclaimer-banner" style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                        <Info size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                        <span>Tu contraseña se envía por HTTPS a nuestro proxy y <strong>nunca se guarda</strong>. Solo el token de sesión (1h de TTL) queda en tu dispositivo.</span>
                     </div>
                     <button className="btn btn--primary btn--full btn--lg"
-                        onClick={() => addToast('⚠️ Requiere configurar Firebase Cloud Functions en producción. En modo demo, usa import CSV.', 'info')}
-                        disabled={!user || !pass}>
-                        <Wifi size={18} /> Conectar y sincronizar
+                        onClick={handleLogin}
+                        disabled={!email || !pass || loading}>
+                        {loading ? <><span className="spinner" /> Conectando...</> : <><Wifi size={18} /> Conectar y sincronizar</>}
                     </button>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
-                        <Info size={14} />
-                        En modo local (localhost), la Cloud Function no está desplegada. Funciona completamente en producción con Firebase.
-                    </div>
                 </div>
             </div>
         </div>
     )
 }
+
+
