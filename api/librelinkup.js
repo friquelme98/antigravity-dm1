@@ -15,7 +15,7 @@ const LLU_HEADERS = {
     'version': '4.12.0',
     'accept-encoding': 'gzip, deflate, br',
     'connection': 'keep-alive',
-    'content-type': 'application/json',
+    'content-type': 'application/json; charset=utf-8',
     'accept': 'application/json',
     'cache-control': 'no-cache',
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
@@ -31,7 +31,8 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end()
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-    const { action, email, password, token, patientId, region = 'EU' } = req.body || {}
+    const { action, password, token, patientId, region = 'EU' } = req.body || {}
+    const email = req.body?.email?.trim()
     const baseUrl = REGION_URLS[region] || REGION_URLS.EU
 
     try {
