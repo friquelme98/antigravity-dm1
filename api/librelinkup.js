@@ -18,6 +18,8 @@ const LLU_HEADERS = {
     'content-type': 'application/json',
     'accept': 'application/json',
     'cache-control': 'no-cache',
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
 }
 
 export default async function handler(req, res) {
@@ -43,7 +45,12 @@ export default async function handler(req, res) {
                 body: JSON.stringify({ email, password }),
             })
 
-            const loginData = await loginRes.json()
+            const loginBody = await loginRes.text()
+            let loginData
+            try { loginData = JSON.parse(loginBody) } catch (e) {
+                console.error('[LLU Auth Error Raw]', loginBody)
+                return res.status(502).json({ error: 'Respuesta del servidor LibreLinkUp bloqueda o en mantenimiento.' })
+            }
 
             // LibreLinkUp puede redirigir a otra región
             if (loginData?.data?.redirect && loginData?.data?.region) {
@@ -56,7 +63,7 @@ export default async function handler(req, res) {
                 })
                 const retryData = await retryRes.json()
                 if (!retryData?.data?.authTicket?.token) {
-                    return res.status(401).json({ error: 'Credenciales incorrectas o región incorrecta', detail: retryData?.error })
+                    return res.status(401).json({ error: 'Credenciales incorrectas o región incorrecta', detail: retryData?.error?.message || retryData?.error })
                 }
                 return await fetchConnections(retryData.data.authTicket.token, redirectUrl, res)
             }
