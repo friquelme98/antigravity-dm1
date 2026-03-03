@@ -50,7 +50,7 @@ export default async function handler(req, res) {
             let loginData
             try { loginData = JSON.parse(loginBody) } catch (e) {
                 console.error('[LLU Auth Error Raw]', loginBody)
-                return res.status(502).json({ error: 'Respuesta del servidor LibreLinkUp bloqueda o en mantenimiento.' })
+                return res.status(502).json({ error: 'Vercel bloqueado por Abbott', detail: loginBody.substring(0, 100) })
             }
 
             // LibreLinkUp puede redirigir a otra región
