@@ -28,23 +28,42 @@ const getHeaders = () => {
     }
 }
 
-export default async function handler(req, res) {
-    // CORS — solo desde nuestro dominio
-    res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+export const config = {
+    runtime: 'edge', // Usa Edge Runtime (Cloudflare) para evitar bloqueo de Datacenter IP
+}
 
-    if (req.method === 'OPTIONS') return res.status(200).end()
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+export default async function handler(req) {
+    // Edge runtime req es un objeto Request web estándar
+    if (req.method === 'OPTIONS') {
+        return new Response(null, {
+            status: 200,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+            }
+        })
+    }
 
-    const { action, password, token, patientId, region = 'EU' } = req.body || {}
-    const email = req.body?.email?.trim()
+    if (req.method !== 'POST') {
+        return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405 })
+    }
+
+    let body
+    try {
+        body = await req.json()
+    } catch {
+        return new Response(JSON.stringify({ error: 'Body no válido' }), { status: 400 })
+    }
+
+    const { action, password, token, patientId, region = 'EU' } = body
+    const email = body?.email?.trim()
     const baseUrl = REGION_URLS[region] || REGION_URLS.EU
 
     try {
         // ── LOGIN ──────────────────────────────────────────────────────────────
         if (action === 'login') {
-            if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos' })
+            if (!email || !password) return jsonResponse({ error: 'Email y contraseña requeridos' }, 400)
 
             const loginRes = await fetch(`${baseUrl}/llu/auth/login`, {
                 method: 'POST',
@@ -56,7 +75,7 @@ export default async function handler(req, res) {
             let loginData
             try { loginData = JSON.parse(loginBody) } catch (e) {
                 console.error('[LLU Auth Error Raw]', loginBody)
-                return res.status(502).json({ error: 'Vercel bloqueado por Abbott', detail: loginBody.substring(0, 100) })
+                return jsonResponse({ error: 'Vercel bloqueado por Abbott', detail: loginBody.substring(0, 100) }, 502)
             }
 
             // LibreLinkUp puede redirigir a otra región
@@ -70,33 +89,33 @@ export default async function handler(req, res) {
                 })
                 const retryData = await retryRes.json()
                 if (!retryData?.data?.authTicket?.token) {
-                    return res.status(401).json({ error: 'Credenciales incorrectas o región incorrecta', detail: retryData?.error?.message || retryData?.error })
+                    return jsonResponse({ error: 'Credenciales incorrectas o región incorrecta', detail: retryData?.error?.message || retryData?.error }, 401)
                 }
-                return await fetchConnections(retryData.data.authTicket.token, redirectUrl, res)
+                return await fetchConnections(retryData.data.authTicket.token, redirectUrl)
             }
 
             if (!loginData?.data?.authTicket?.token) {
-                return res.status(401).json({ error: 'Credenciales incorrectas', detail: loginData?.error?.message })
+                return jsonResponse({ error: 'Credenciales incorrectas', detail: loginData?.error?.message }, 401)
             }
 
-            return await fetchConnections(loginData.data.authTicket.token, baseUrl, res)
+            return await fetchConnections(loginData.data.authTicket.token, baseUrl)
         }
 
-        // ── FETCH GLUCOSE (usa token guardado en cliente) ─────────────────────
+        // ── FETCH GLUCOSE ─────────────────────────────────────────────────────
         if (action === 'fetch') {
-            if (!token || !patientId) return res.status(400).json({ error: 'Token y patientId requeridos' })
+            if (!token || !patientId) return jsonResponse({ error: 'Token y patientId requeridos' }, 400)
 
             const graphRes = await fetch(`${baseUrl}/llu/connections/${patientId}/graph`, {
                 headers: { ...getHeaders(), authorization: `Bearer ${token}` },
             })
 
-            if (!graphRes.ok) return res.status(401).json({ error: 'Token expirado o inválido — vuelve a iniciar sesión' })
+            if (!graphRes.ok) return jsonResponse({ error: 'Token expirado o inválido — vuelve a iniciar sesión' }, 401)
 
             const graphData = await graphRes.json()
             const readings = mapReadings(graphData?.data?.graphData || [])
             const current = graphData?.data?.connection?.glucoseMeasurement
 
-            return res.status(200).json({
+            return jsonResponse({
                 readings,
                 current: current ? {
                     value_mgdl: current.ValueInMgPerDl,
@@ -106,38 +125,48 @@ export default async function handler(req, res) {
             })
         }
 
-        // ── CONNECTIONS (lista de pacientes — puede ser el propio usuario) ─────
+        // ── CONNECTIONS ────────────────────────────────────────────────────────
         if (action === 'connections') {
-            if (!token) return res.status(400).json({ error: 'Token requerido' })
+            if (!token) return jsonResponse({ error: 'Token requerido' }, 400)
 
             const connRes = await fetch(`${baseUrl}/llu/connections`, {
                 headers: { ...getHeaders(), authorization: `Bearer ${token}` },
             })
 
             const connData = await connRes.json()
-            return res.status(200).json({ connections: connData?.data || [] })
+            return jsonResponse({ connections: connData?.data || [] })
         }
 
-        return res.status(400).json({ error: `Acción "${action}" no reconocida` })
+        return jsonResponse({ error: `Acción "${action}" no reconocida` }, 400)
 
     } catch (err) {
         console.error('[LibreLinkUp Proxy]', err)
-        return res.status(500).json({ error: 'Error interno del proxy', detail: err.message })
+        return jsonResponse({ error: 'Error interno del proxy', detail: err.message }, 500)
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-async function fetchConnections(token, baseUrl, res) {
+
+function jsonResponse(data, status = 200) {
+    return new Response(JSON.stringify(data), {
+        status,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        },
+    })
+}
+
+async function fetchConnections(token, baseUrl) {
     const connRes = await fetch(`${baseUrl}/llu/connections`, {
         headers: { ...getHeaders(), authorization: `Bearer ${token}` },
     })
     const connData = await connRes.json()
     const connections = connData?.data || []
 
-    // Normalmente hay una sola conexión (el propio sensor del usuario)
     const patient = connections[0]
 
-    return res.status(200).json({
+    return jsonResponse({
         token,
         patientId: patient?.patientId || null,
         connections,
