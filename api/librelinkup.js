@@ -10,16 +10,22 @@ const REGION_URLS = {
     CA: 'https://api-ca.libreview.io',
 }
 
-const LLU_HEADERS = {
-    'product': 'llu.ios',
-    'version': '4.12.0',
-    'accept-encoding': 'gzip, deflate, br',
-    'connection': 'keep-alive',
-    'content-type': 'application/json; charset=utf-8',
-    'accept': 'application/json',
-    'cache-control': 'no-cache',
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
-    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+const getHeaders = () => {
+    const randomIp = `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`
+    return {
+        'product': 'llu.ios',
+        'version': '4.12.0',
+        'accept-encoding': 'gzip, deflate, br',
+        'connection': 'keep-alive',
+        'content-type': 'application/json; charset=utf-8',
+        'accept': 'application/json',
+        'cache-control': 'no-cache',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'X-Forwarded-For': randomIp,
+        'X-Real-IP': randomIp,
+        'True-Client-IP': randomIp,
+    }
 }
 
 export default async function handler(req, res) {
@@ -42,7 +48,7 @@ export default async function handler(req, res) {
 
             const loginRes = await fetch(`${baseUrl}/llu/auth/login`, {
                 method: 'POST',
-                headers: LLU_HEADERS,
+                headers: getHeaders(),
                 body: JSON.stringify({ email, password }),
             })
 
@@ -59,7 +65,7 @@ export default async function handler(req, res) {
                 const redirectUrl = REGION_URLS[redirectRegion] || baseUrl
                 const retryRes = await fetch(`${redirectUrl}/llu/auth/login`, {
                     method: 'POST',
-                    headers: LLU_HEADERS,
+                    headers: getHeaders(),
                     body: JSON.stringify({ email, password }),
                 })
                 const retryData = await retryRes.json()
@@ -81,7 +87,7 @@ export default async function handler(req, res) {
             if (!token || !patientId) return res.status(400).json({ error: 'Token y patientId requeridos' })
 
             const graphRes = await fetch(`${baseUrl}/llu/connections/${patientId}/graph`, {
-                headers: { ...LLU_HEADERS, authorization: `Bearer ${token}` },
+                headers: { ...getHeaders(), authorization: `Bearer ${token}` },
             })
 
             if (!graphRes.ok) return res.status(401).json({ error: 'Token expirado o inválido — vuelve a iniciar sesión' })
@@ -105,7 +111,7 @@ export default async function handler(req, res) {
             if (!token) return res.status(400).json({ error: 'Token requerido' })
 
             const connRes = await fetch(`${baseUrl}/llu/connections`, {
-                headers: { ...LLU_HEADERS, authorization: `Bearer ${token}` },
+                headers: { ...getHeaders(), authorization: `Bearer ${token}` },
             })
 
             const connData = await connRes.json()
@@ -123,7 +129,7 @@ export default async function handler(req, res) {
 // ── Helpers ────────────────────────────────────────────────────────────────
 async function fetchConnections(token, baseUrl, res) {
     const connRes = await fetch(`${baseUrl}/llu/connections`, {
-        headers: { ...LLU_HEADERS, authorization: `Bearer ${token}` },
+        headers: { ...getHeaders(), authorization: `Bearer ${token}` },
     })
     const connData = await connRes.json()
     const connections = connData?.data || []
